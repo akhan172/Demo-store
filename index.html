@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catalogue demo</title>
+<style>
+  :root { --bg:#f5f6f4; --ink:#16232b; --muted:#5d6b73; --line:#dde2e0; --card:#fff; --accent:#1d6b57; --warn:#b26a00; --out:#8a949a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:28px 20px 12px; max-width:1000px; margin:0 auto; }
+  h1 { margin:0 0 4px; font-size:1.7rem; letter-spacing:-.01em; }
+  header p { margin:0; color:var(--muted); font-size:.95rem; }
+  .bar { max-width:1000px; margin:0 auto; padding:8px 20px 16px; display:flex; gap:10px; flex-wrap:wrap; }
+  input, select { font:inherit; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); }
+  input { flex:1 1 200px; }
+  input:focus-visible, select:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  main { max-width:1000px; margin:0 auto; padding:0 20px 40px; display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:16px; }
+  .item { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; }
+  .item img { width:100%; aspect-ratio:4/3; object-fit:cover; background:#e9edeb; display:block; }
+  .item.out img { filter:grayscale(1); opacity:.6; }
+  .body { padding:12px 14px 14px; display:flex; flex-direction:column; gap:4px; flex:1; }
+  .brand { font-size:.8rem; color:var(--muted); }
+  .name { font-weight:600; }
+  .variant { font-size:.88rem; color:var(--muted); }
+  .row { display:flex; justify-content:space-between; align-items:center; margin-top:auto; padding-top:10px; }
+  .price { font-size:1.15rem; font-weight:700; }
+  .tag { font-size:.78rem; padding:3px 8px; border-radius:99px; border:1px solid currentColor; }
+  .in { color:var(--accent); } .low { color:var(--warn); } .out-t { color:var(--out); }
+  .btn { display:block; text-align:center; margin-top:10px; padding:10px; border-radius:8px; background:var(--accent); color:#fff; text-decoration:none; font-weight:600; }
+  .btn.disabled { background:#e3e7e5; color:var(--out); pointer-events:none; }
+  .note { max-width:1000px; margin:0 auto; padding:0 20px 12px; color:var(--muted); font-size:.85rem; }
+  .empty { grid-column:1/-1; text-align:center; color:var(--muted); padding:40px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Demo Nutrition Store</h1>
+  <p>Browse products and order on WhatsApp.</p>
+</header>
+
+<div class="bar">
+  <input id="q" type="search" placeholder="Search products or brands" aria-label="Search">
+  <select id="cat" aria-label="Category"><option value="">All categories</option></select>
+</div>
+<div class="note" id="updated"></div>
+<main id="grid"></main>
+
+<script>
+// ====== CONFIG: edit these two lines ======
+const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS7g50-SvSyxbezsgGm5m00HcaP3kzcdvqDGGPZ4WC6XNddD2ieMHV8aHFlrjyni2TQRE-tZFxryTf1/pub?gid=0&single=true&output=csv";          // paste your "Publish to web -> CSV" link here. Empty = uses sample data.
+const WHATSAPP_NUMBER = "918789745990"; // country code + number, no + or spaces
+// ==========================================
+
+const SAMPLE_CSV = `id,name,brand,variant,price,image,status,category
+1,Whey Protein,BrandA,2 kg Chocolate,4999,https://picsum.photos/seed/whey/400/300,in stock,Protein
+2,Whey Protein,BrandA,1 kg Vanilla,2799,https://picsum.photos/seed/whey2/400/300,low,Protein
+3,Creatine Monohydrate,BrandB,250 g Unflavoured,1299,https://picsum.photos/seed/creatine/400/300,in stock,Performance
+4,Pre-Workout,BrandC,300 g Fruit Punch,1899,https://picsum.photos/seed/pre/400/300,out,Performance
+5,Multivitamin,BrandD,60 tablets,699,https://picsum.photos/seed/multi/400/300,in stock,Vitamins
+6,Omega-3 Fish Oil,BrandD,90 softgels,899,https://picsum.photos/seed/omega/400/300,out,Vitamins`;
+
+const CACHE_KEY = "catalogue_v1", CACHE_MS = 5 * 60 * 1000;
+let products = [];
+
+// Small CSV parser that handles quoted fields
+function parseCSV(text) {
+  const rows = []; let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"' && text[i+1] === '"') { cell += '"'; i++; }
+      else if (c === '"') q = false;
+      else cell += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i+1] === "\n") i++;
+      row.push(cell); rows.push(row); row = []; cell = "";
+    } else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  const head = rows.shift().map(h => h.trim().toLowerCase());
+  return rows.filter(r => r.some(x => x.trim())).map(r =>
+    Object.fromEntries(head.map((h, i) => [h, (r[i] || "").trim()])));
+}
+
+async function loadCSV() {
+  if (!SHEET_CSV_URL) return { text: SAMPLE_CSV, time: Date.now() };
+  try {
+    const c = JSON.parse(sessionStorage.getItem(CACHE_KEY) || "null");
+    if (c && Date.now() - c.time < CACHE_MS) return c;
+  } catch (e) {}
+  const res = await fetch(SHEET_CSV_URL);
+  if (!res.ok) throw new Error("Could not load the sheet");
+  const data = { text: await res.text(), time: Date.now() };
+  try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch (e) {}
+  return data;
+}
+
+function statusInfo(s) {
+  s = (s || "").toLowerCase();
+  if (s.startsWith("out")) return { label: "Sold out", cls: "out-t", out: true };
+  if (s.startsWith("low")) return { label: "Low stock", cls: "low", out: false };
+  return { label: "In stock", cls: "in", out: false };
+}
+
+function waLink(p) {
+  const msg = `Hi, I'm interested in ${p.brand} ${p.name} (${p.variant}) at ₹${p.price}. Is it available?`;
+  return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(msg)}`;
+}
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function render() {
+  const q = document.getElementById("q").value.toLowerCase();
+  const cat = document.getElementById("cat").value;
+  const list = products.filter(p =>
+    (!cat || p.category === cat) &&
+    (`${p.name} ${p.brand} ${p.variant}`.toLowerCase().includes(q)));
+  document.getElementById("grid").innerHTML = list.length ? list.map(p => {
+    const s = statusInfo(p.status);
+    return `<article class="item ${s.out ? "out" : ""}">
+      <img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy">
+      <div class="body">
+        <span class="brand">${esc(p.brand)}</span>
+        <span class="name">${esc(p.name)}</span>
+        <span class="variant">${esc(p.variant)}</span>
+        <div class="row"><span class="price">₹${esc(p.price)}</span><span class="tag ${s.cls}">${s.label}</span></div>
+        <a class="btn ${s.out ? "disabled" : ""}" href="${s.out ? "#" : waLink(p)}" target="_blank" rel="noopener">${s.out ? "Unavailable" : "Order on WhatsApp"}</a>
+      </div></article>`;
+  }).join("") : `<div class="empty">No products match your search.</div>`;
+}
+
+(async function init() {
+  try {
+    const { text, time } = await loadCSV();
+    products = parseCSV(text);
+    const cats = [...new Set(products.map(p => p.category).filter(Boolean))];
+    document.getElementById("cat").innerHTML += cats.map(c => `<option>${esc(c)}</option>`).join("");
+    document.getElementById("updated").textContent =
+      (SHEET_CSV_URL ? "" : "Showing sample data. ") + "Stock updated " + new Date(time).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+    render();
+  } catch (e) {
+    document.getElementById("grid").innerHTML = `<div class="empty">${esc(e.message)}. Check the sheet link and try again.</div>`;
+  }
+  document.getElementById("q").addEventListener("input", render);
+  document.getElementById("cat").addEventListener("change", render);
+})();
+</script>
+</body>
+</html>
